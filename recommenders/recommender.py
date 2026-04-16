@@ -2,94 +2,104 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from typing import List, Dict, Any
+
+import pandas as pd
+from tqdm import tqdm
 
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import logging
 
+
+logger = logging.getLogger(__name__)
 
 class Recommender(ABC):
-    MODEL_NAME = "base"
-
-    def get_model_name(self) -> str:
-        return self.MODEL_NAME
-
-    @abstractmethod
-    def recommend(self, user_id: int, num_recommendations: int = 10) -> list[int]:
-        pass
-
-
-class ContentBasedRecommender(Recommender):
-    """Content-based recommender using a user profile vector and cosine similarity to items."""
-
-    MODEL_NAME = "content-based"
-
     def __init__(
         self,
-        item_embeddings: Mapping[int, np.ndarray],
-        user_item_history: Mapping[int, Sequence[int]],
+        data_loader=None,
+        k: int = 5,
         *,
-        recency_decay: float | None = None,
-    ) -> None:
+        interaction_item_col: str = "click_article_id",
+    ):
+        self.data_loader = data_loader
+        self.name = self.__class__.__name__
+        self.k = k
+        self.interaction_item_col = interaction_item_col
+
+    @abstractmethod
+    def recommend(self, user_id: int, num_recommendations: int = 5, **kwargs) -> List[Dict[str, Any]]:
+        """Recommend items for a given user."""
+        raise NotImplementedError("Subclasses must implement this method")
+
+    def prepare_embeddings(self, test_data: pd.DataFrame) -> None:
+        """Optional hook before evaluation (e.g. load and restrict embedding table)."""
+        pass
+
+    def _get_user_clicked_items(self, user_id: int) -> set:
+        """Get the items that the user has already seen."""
+        user_history = self.data_loader.get_user_history(user_id)
+        return set(user_history['click_article_id'].tolist())
+
+    def evaluate(self, test_data: pd.DataFrame) -> float:
         """
+        Evaluate the recommender model on the test data.
+
         Args:
-            item_embeddings: Maps each item id to its embedding vector.
-            user_item_history: Maps each user id to clicked item ids (order = chronological).
-            recency_decay: If set (e.g. 0.9), weights recent clicks more when building the profile.
+            test_data (pd.DataFrame): The test data containing user-item interactions.
+        Returns:
+            float: The evaluation metric score (e.g., precision, recall, etc.).
         """
-        self._item_embeddings = {
-            int(k): np.asarray(v, dtype=np.float64).ravel()
-            for k, v in item_embeddings.items()
-        }
-        self._user_history = {
-            int(uid): [int(i) for i in items] for uid, items in user_item_history.items()
-        }
-        if recency_decay is not None and not (0 < recency_decay <= 1):
-            raise ValueError("recency_decay must be in (0, 1] or None")
-        self._recency_decay = recency_decay
+        self.prepare_embeddings(test_data)
 
-    def _user_profile(self, user_id: int) -> np.ndarray | None:
-        history = self._user_history.get(user_id)
-        if not history:
-            return None
+        # Instantiate lists to store evaluation metrics
+        hits, precisions, recalls, f1s = [], [], [], []
 
-        vectors: list[np.ndarray] = []
-        weights: list[float] = []
-        # Iterate from most recent click to oldest so decay applies to recency.
-        for rank, item_id in enumerate(reversed(history)):
-            vec = self._item_embeddings.get(item_id)
-            if vec is None or vec.size == 0:
+        # Iterate over each user in the test data
+        for user_id in tqdm(test_data["user_id"].unique()):
+            ic = self.interaction_item_col
+            true_items = set(
+                test_data.loc[test_data["user_id"] == user_id, ic].unique()
+            )
+            # If a user has no true items, skip evaluation for this user
+            if not true_items:
                 continue
-            w = 1.0 if self._recency_decay is None else self._recency_decay**rank
-            vectors.append(vec)
-            weights.append(w)
 
-        if not vectors:
-            return None
+            recommended_items = self.recommend(user_id, num_recommendations=self.k)
+            rec_ids = [
+                int(item["article_id"]) if isinstance(item, dict) else int(item)
+                for item in recommended_items
+            ]
+            top_k = set(rec_ids[: self.k])
+            n_hit = len(true_items & top_k)
 
-        w_arr = np.asarray(weights, dtype=np.float64)
-        w_arr /= w_arr.sum()
-        stacked = np.stack(vectors, axis=0)
-        return np.average(stacked, axis=0, weights=w_arr)
+            hit = 1.0 if n_hit > 0 else 0.0
+            precision = n_hit / len(top_k)
+            recall = n_hit / len(true_items)
+            f1 = (
+                2 * precision * recall / (precision + recall)
+                if precision + recall > 0
+                else 0.0
+            )
 
-    def recommend(self, user_id: int, num_recommendations: int = 10) -> list[int]:
-        profile = self._user_profile(user_id)
-        if profile is None:
-            return []
+            hits.append(hit)
+            precisions.append(precision)
+            recalls.append(recall)
+            f1s.append(f1)
 
-        seen = set(self._user_history.get(user_id, []))
-        candidates = [iid for iid in self._item_embeddings if iid not in seen]
-        if not candidates:
-            return []
+        return {
+            f"Hit@{self.k}": np.mean(hits).round(4),
+            f"Precision@{self.k}": np.mean(precisions).round(4),
+            f"Recall@{self.k}": np.mean(recalls).round(4),
+            f"F1@{self.k}": np.mean(f1s).round(4),
+        }
 
-        matrix = np.stack([self._item_embeddings[iid] for iid in candidates])
-        sims = cosine_similarity(profile.reshape(1, -1), matrix, dense_output=True)[0]
-        top_idx = np.argsort(-sims)[:num_recommendations]
-        return [candidates[int(i)] for i in top_idx]
+    def _format_recommendation(self, article_id: int, score: float, reason: str = "") -> Dict[str, Any]:
+        """Format a recommendation"""
+        article_info = self.data_loader.get_article_info(article_id)
 
-
-class CollaborativeFilteringRecommender(Recommender):
-    MODEL_NAME = "collaborative-filtering"
-
-    def recommend(self, user_id: int, num_recommendations: int = 10) -> list[int]:
-        return [4, 5, 6]
+        return {
+            "article_id": int(article_id),
+            "score": float(score),
+            "reason": reason,
+            "metadata": article_info
+        }
