@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import pickle
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,15 @@ import pandas as pd
 from constants import DATA_PATH
 
 logger = logging.getLogger(__name__)
+
+
+def _interaction_event_times(df: pd.DataFrame) -> pd.Series:
+    if "click_datetime" in df.columns:
+        return pd.to_datetime(df["click_datetime"], errors="coerce")
+    ts = df["click_timestamp"]
+    if pd.api.types.is_numeric_dtype(ts):
+        return pd.to_datetime(ts, unit="ms", errors="coerce")
+    return pd.to_datetime(ts, errors="coerce")
 
 
 class DataLoader:
@@ -45,11 +54,48 @@ class DataLoader:
         return self._articles_embeddings
 
     def get_embeddings_by_ids(self, article_ids: List[int]) -> np.ndarray:
-        """Extract an embeddings matrix from a list of IDs (Vectorized)."""
         matrix = self.load_article_embeddings_matrix()
-        # We ensure that the IDs are within the bounds to avoid an IndexError
-        valid_ids = [aid for aid in article_ids if 0 <= aid < len(matrix)]
+        # On s'assure que les IDs sont valides
+        valid_ids = [int(aid) for aid in article_ids if 0 <= aid < len(matrix)]
         return matrix[valid_ids]
+
+    def embeddings_aligned_to_article_ids(
+        self,
+        article_ids: Iterable[int],
+        *,
+        drop_out_of_range: bool = True,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Sorted unique article ids and embedding rows in the same order (row i ↔ ``ids[i]``).
+
+        Pickle matrix rows are indexed by ``article_id`` for this dataset (ids 0 .. n_rows-1).
+
+        Args:
+            article_ids: e.g. union of ``article_id`` values from train and test clicks.
+            drop_out_of_range: If True, omit ids outside ``[0, n_rows)``. If False, raise.
+        """
+        matrix = self.load_article_embeddings_matrix()
+        raw = np.unique(np.asarray(list(article_ids), dtype=np.int64))
+        n = len(matrix)
+        ok = (raw >= 0) & (raw < n)
+        if not np.all(ok):
+            bad = raw[~ok]
+            if drop_out_of_range:
+                logger.warning(
+                    "embeddings_aligned_to_article_ids: dropping %d article_ids "
+                    "outside [0, %d) (examples: %s)",
+                    int(bad.size),
+                    n,
+                    bad[: min(5, bad.size)].tolist(),
+                )
+                raw = raw[ok]
+            else:
+                raise ValueError(
+                    f"article_ids out of embedding range [0, {n}): {bad[:20].tolist()}"
+                )
+        if raw.size == 0:
+            raise ValueError("no valid article_ids for embedding lookup")
+        return raw, matrix[raw]
 
     def load_user_interactions(self) -> pd.DataFrame:
         """Load and cache all user–article clicks from ``data/clicks/*.csv``."""
@@ -75,8 +121,20 @@ class DataLoader:
         return self._user_interactions
 
     def load_interactions_table(self) -> pd.DataFrame:
-        """Alias for :meth:`load_user_interactions` (backward compatibility)."""
-        return self.load_user_interactions()
+        """Load the articles metadata"""
+        if self._articles_metadata is None:
+            metadata_path = self.data_path / "articles_metadata.csv"
+            df = pd.read_csv(metadata_path)
+
+            # Add the creation date
+            df['created_date'] = pd.to_datetime(df['created_at_ts'], unit='ms')
+
+            self._articles_metadata = df
+            logger.info(f"Articles metadata loaded: {len(df):,} articles")
+
+        return self._articles_metadata
+
+
 
     def get_user_history(self, user_id: int, limit: Optional[int] = None) -> pd.DataFrame:
         """Get the history of the user."""
@@ -88,6 +146,108 @@ class DataLoader:
             user_data = user_data.head(limit)
 
         return user_data
+
+    def _get_reference_date(self) -> pd.Timestamp:
+        """Latest click time in loaded interactions, else latest article ``created_date``."""
+        if self._reference_date is not None:
+            return self._reference_date
+        interactions = self.load_user_interactions()
+        try:
+            if len(interactions) > 0 :
+                ref = interactions["click_datetime"].max()
+            else:
+                metadata = self.load_articles_metadata()
+                ref = pd.to_datetime(metadata["created_date"]).max()
+        except Exception as e:
+            logger.error(f"Error getting reference date: {e}")
+            ref = pd.Timestamp.now()
+        self._reference_date = pd.Timestamp(ref)
+        return self._reference_date
+
+    def data_split(
+        self,
+        interactions: pd.DataFrame,
+        *,
+        min_clicks_per_user: int = 5,
+        keep_duplicate_clicks: bool = False,
+        duplicate_weight_mode: Optional[Literal["count"]] = None,
+        item_col: str = "click_article_id",
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Build a temporal train/validation split on click interactions.
+
+        Only users with at least ``min_clicks_per_user`` interactions (rows, after
+        optional deduplication) are kept. For each such user, the chronologically
+        last click is held out as validation; all earlier clicks stay in train.
+        That validation article is unseen in training for that user.
+
+        Args:
+            interactions: Must include ``user_id``, ``item_col``, and
+                ``click_timestamp`` (numeric ms or datetime-like).
+            min_clicks_per_user: Minimum interaction count per user after
+                duplicate handling.
+            keep_duplicate_clicks: If False, collapse repeated (user, article)
+                clicks to a single row, keeping the latest ``click_timestamp``.
+                If True, keep every click row.
+            duplicate_weight_mode: Only used when ``keep_duplicate_clicks`` is
+                True. If ``"count"``, adds ``interaction_weight`` = number of
+                clicks for that (user, article) pair (same value on each duplicate
+                row). If None, no weight column is added.
+            item_col: Column name for the article id (e.g. ``click_article_id``
+                from raw clicks or ``article_id`` from merged EDA exports).
+
+        Returns:
+            (train_df, val_df) with the same columns as the prepared interactions
+            (plus ``interaction_weight`` when requested).
+
+        Raises:
+            ValueError: If required columns are missing or ``duplicate_weight_mode``
+                is set while ``keep_duplicate_clicks`` is False.
+        """
+        required = {"user_id", "click_timestamp", item_col}
+        missing = required - set(interactions.columns)
+        if missing:
+            raise ValueError(f"interactions missing columns: {sorted(missing)}")
+
+        if duplicate_weight_mode is not None and not keep_duplicate_clicks:
+            raise ValueError(
+                "duplicate_weight_mode is only supported when keep_duplicate_clicks=True"
+            )
+        if duplicate_weight_mode not in (None, "count"):
+            raise ValueError('duplicate_weight_mode must be None or "count"')
+
+        df = interactions.loc[:, list(interactions.columns)].copy()
+        sort_keys: List[str] = ["user_id", "click_timestamp"]
+        if "click_datetime" in df.columns:
+            sort_keys.append("click_datetime")
+        # Stable ordering when timestamps tie
+        df["_row_order"] = np.arange(len(df), dtype=np.int64)
+        sort_keys.append("_row_order")
+        df = df.sort_values(sort_keys, kind="mergesort")
+
+        pair_keys = ["user_id", item_col]
+        if keep_duplicate_clicks:
+            if duplicate_weight_mode == "count":
+                df["interaction_weight"] = df.groupby(pair_keys, sort=False)[
+                    "click_timestamp"
+                ].transform("size")
+        else:
+            df = df.drop_duplicates(subset=pair_keys, keep="last")
+
+        df = df.drop(columns=["_row_order"])
+
+        user_counts = df.groupby("user_id", sort=False).size()
+        eligible_users = user_counts[user_counts >= min_clicks_per_user].index
+        df = df[df["user_id"].isin(eligible_users)]
+
+        val_idx = df.groupby("user_id", sort=False).tail(1).index
+        val_df = df.loc[val_idx].copy()
+        train_df = df.drop(val_idx).copy()
+
+        print(f'Total number of users in train: {train_df["user_id"].nunique()}')
+        print(f'Total number of users in val: {val_df["user_id"].nunique()}')
+
+        return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
     def get_recent_popular_articles(self, days: int = None) -> pd.DataFrame:
         """Get the recent popular articles with age normalization."""
