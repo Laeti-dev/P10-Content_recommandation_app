@@ -16,8 +16,10 @@ class ContentBasedRecommender(Recommender):
     """
     Content-based recommender.
 
-    Uses a user profile built from clicked-article embeddings and recommends the most
-    similar candidate articles by cosine similarity.
+    Uses a user profile built from clicked-article embeddings and recommends candidate
+    articles using cosine similarity. By default the highest-scoring items are returned;
+    optionally, items can be drawn uniformly at random among those whose raw cosine
+    similarity exceeds ``min_cosine_similarity``.
     """
     MODEL_NAME = "content-based"
 
@@ -41,6 +43,10 @@ class ContentBasedRecommender(Recommender):
         score_strategy: Literal["cosine", "popularity_novelty"] = "cosine",
         popularity_penalty: float = 0.0,
         novelty_boost: float = 0.0,
+        # Final item selection (after masking)
+        selection_strategy: Literal["top", "random_above_cosine_threshold"] = "top",
+        min_cosine_similarity: float = 0.7,
+        random_state: Optional[int] = None,
         # Columns / metadata
         timestamp_col: str = "click_timestamp",
         category_col: str = "category_id",
@@ -68,28 +74,64 @@ class ContentBasedRecommender(Recommender):
         self._popularity_penalty = float(popularity_penalty)
         self._novelty_boost = float(novelty_boost)
 
-        # Candidate pool defaults to all items present in training.
-        ic = self.interaction_item_col
-        if candidate_article_ids is None:
-            candidate_article_ids = (
-                self._train_df[ic].dropna().astype(int).unique().tolist()
-            )
-        self._candidate_article_ids = [int(x) for x in candidate_article_ids]
+        self._selection_strategy = selection_strategy
+        self._min_cosine_similarity = float(min_cosine_similarity)
+        self._random_state = random_state
+        self._rng = np.random.default_rng(random_state)
 
-        # Preload candidate embeddings once for fast recommend calls.
-        self._candidate_embeddings = self.get_item_embeddings(self._candidate_article_ids)
-        if self._candidate_embeddings.ndim != 2:
-            raise ValueError(
-                "expected candidate embeddings matrix of shape (n_items, dim)"
-            )
-        self._candidate_norms = np.linalg.norm(self._candidate_embeddings, axis=1)
+        # Keep candidate pool as config; heavy precomputations happen in fit().
+        self._candidate_article_ids_cfg = (
+            None if candidate_article_ids is None else [int(x) for x in candidate_article_ids]
+        )
 
-        # Precompute candidate metadata aligned with candidate ids (for fast filtering/re-ranking).
-        self._candidate_category_ids, self._candidate_created_days = self._load_candidate_metadata()
-        self._candidate_popularity = self._compute_candidate_popularity()
+        # Attributes populated by fit()
+        self._is_fitted: bool = False
+        self._candidate_article_ids: List[int] = []
+        self._candidate_embeddings: Optional[np.ndarray] = None
+        self._candidate_norms: Optional[np.ndarray] = None
+        self._candidate_category_ids: Optional[np.ndarray] = None
+        self._candidate_created_days: Optional[np.ndarray] = None
+        self._candidate_popularity: Optional[np.ndarray] = None
 
     def get_model_name(self) -> str:
         return self.MODEL_NAME
+
+    def fit(self) -> "ContentBasedRecommender":
+        """
+        Prepare candidate tables (embeddings + metadata) for fast recommend().
+
+        This keeps __init__ lightweight and makes the expensive preprocessing explicit.
+        """
+        # Candidate pool defaults to all items present in training.
+        ic = self.interaction_item_col
+        if self._candidate_article_ids_cfg is None:
+            candidate_article_ids = (
+                self._train_df[ic].dropna().astype(int).unique().tolist()
+                if ic in self._train_df.columns
+                else []
+            )
+        else:
+            candidate_article_ids = list(self._candidate_article_ids_cfg)
+
+        self._candidate_article_ids = [int(x) for x in candidate_article_ids]
+        if not self._candidate_article_ids:
+            raise ValueError("candidate_article_ids is empty; cannot fit recommender")
+
+        # Preload candidate embeddings once for fast recommend calls.
+        emb = self.get_item_embeddings(self._candidate_article_ids)
+        if emb.ndim != 2:
+            raise ValueError("expected candidate embeddings matrix of shape (n_items, dim)")
+        self._candidate_embeddings = emb
+        self._candidate_norms = np.linalg.norm(emb, axis=1)
+
+        # Precompute candidate metadata aligned with candidate ids (for fast filtering/re-ranking).
+        cats, created = self._load_candidate_metadata()
+        self._candidate_category_ids = cats
+        self._candidate_created_days = created
+        self._candidate_popularity = self._compute_candidate_popularity()
+
+        self._is_fitted = True
+        return self
 
     def _train_rows_for_user(self, user_id: int) -> pd.DataFrame:
         return self._train_df.loc[self._train_df[self._user_col] == user_id].copy()
@@ -231,13 +273,20 @@ class ContentBasedRecommender(Recommender):
             .value_counts()
         )
         # Map missing ids to 0.
-        raw = np.asarray([float(counts.get(int(a), 0.0)) for a in self._candidate_article_ids], dtype=np.float64)
+        raw = np.asarray(
+            [float(counts.get(int(a), 0.0)) for a in self._candidate_article_ids],
+            dtype=np.float64,
+        )
         if raw.max() <= 0:
             return np.zeros_like(raw)
         return raw / raw.max()
 
     def _cosine_scores_to_candidates(self, user_vector: np.ndarray) -> np.ndarray:
         """Cosine similarity between user_vector and every candidate embedding."""
+        if not self._is_fitted:
+            self.fit()
+        assert self._candidate_embeddings is not None
+        assert self._candidate_norms is not None
         u = np.asarray(user_vector, dtype=np.float64).ravel()
         u_norm = float(np.linalg.norm(u))
         if u_norm == 0.0:
@@ -251,6 +300,9 @@ class ContentBasedRecommender(Recommender):
 
     def _candidate_mask_for_user(self, user_id: int) -> np.ndarray:
         """Boolean mask over candidates based on candidate_strategy."""
+        if not self._is_fitted:
+            self.fit()
+        assert self._candidate_category_ids is not None
         if self._candidate_strategy == "all":
             return np.ones(len(self._candidate_article_ids), dtype=bool)
 
@@ -270,7 +322,8 @@ class ContentBasedRecommender(Recommender):
                 return np.zeros(len(self._candidate_article_ids), dtype=bool)
 
             id_to_cat: Dict[int, int] = {
-                int(a): int(c) for a, c in zip(self._candidate_article_ids, self._candidate_category_ids)
+                int(a): int(c)
+                for a, c in zip(self._candidate_article_ids, self._candidate_category_ids)
             }
             user_cats = [id_to_cat.get(int(a), -1) for a in clicked_ids]
             user_cats = [c for c in user_cats if c != -1]
@@ -289,6 +342,10 @@ class ContentBasedRecommender(Recommender):
             return cosine_scores
 
         if self._score_strategy == "popularity_novelty":
+            if not self._is_fitted:
+                self.fit()
+            assert self._candidate_popularity is not None
+            assert self._candidate_created_days is not None
             s = cosine_scores.astype(np.float64, copy=True)
 
             if self._popularity_penalty != 0.0:
@@ -312,6 +369,8 @@ class ContentBasedRecommender(Recommender):
         self, user_id: int, num_recommendations: int = 5, **kwargs
     ) -> List[Dict]:
         """Recommend articles to a given user (excluding already seen items)."""
+        if not self._is_fitted:
+            self.fit()
         ic = self.interaction_item_col
 
         user_profile = self._build_user_profile_vector(user_id)
@@ -330,8 +389,35 @@ class ContentBasedRecommender(Recommender):
             .tolist()
         )
 
-        # Rank candidates by score (descending), skipping seen items.
-        order = np.argsort(scores)[::-1]
+        reason_base = (
+            f"content/{self._profile_strategy}"
+            f"+{self._candidate_strategy}"
+            f"+{self._score_strategy}"
+        )
+
+        if self._selection_strategy == "top":
+            order = np.argsort(scores)[::-1]
+            recs = self._recommend_top_k(order, scores, seen, num_recommendations, reason_base)
+        elif self._selection_strategy == "random_above_cosine_threshold":
+            eligible = np.flatnonzero(
+                mask & (cosine_scores >= self._min_cosine_similarity)
+            )
+            recs = self._recommend_random_from_indices(
+                eligible, scores, seen, num_recommendations, reason_base
+            )
+        else:
+            raise ValueError(f"unknown selection_strategy: {self._selection_strategy}")
+
+        return recs
+
+    def _recommend_top_k(
+        self,
+        order: np.ndarray,
+        scores: np.ndarray,
+        seen: set,
+        num_recommendations: int,
+        reason_base: str,
+    ) -> List[Dict]:
         recs: List[Dict] = []
         for idx in order:
             aid = int(self._candidate_article_ids[int(idx)])
@@ -343,16 +429,49 @@ class ContentBasedRecommender(Recommender):
                 self._format_recommendation(
                     article_id=aid,
                     score=float(scores[int(idx)]),
-                    reason=(
-                        f"content/{self._profile_strategy}"
-                        f"+{self._candidate_strategy}"
-                        f"+{self._score_strategy}"
-                    ),
+                    reason=reason_base,
                 )
             )
             if len(recs) >= int(num_recommendations):
                 break
-
         return recs
 
+    def _recommend_random_from_indices(
+        self,
+        candidate_indices: np.ndarray,
+        scores: np.ndarray,
+        seen: set,
+        num_recommendations: int,
+        reason_base: str,
+    ) -> List[Dict]:
+        unseen = np.asarray(
+            [
+                int(idx)
+                for idx in candidate_indices
+                if int(self._candidate_article_ids[int(idx)]) not in seen
+                and np.isfinite(scores[int(idx)])
+            ],
+            dtype=np.int64,
+        )
+        if unseen.size == 0:
+            return []
 
+        rng = self._rng
+        pick_n = min(int(num_recommendations), int(unseen.size))
+        chosen = rng.choice(unseen, size=pick_n, replace=False)
+
+        recs: List[Dict] = []
+        for idx in chosen:
+            ii = int(idx)
+            aid = int(self._candidate_article_ids[ii])
+            recs.append(
+                self._format_recommendation(
+                    article_id=aid,
+                    score=float(scores[ii]),
+                    reason=(
+                        f"{reason_base}"
+                        f"+random_cosine>{self._min_cosine_similarity:g}"
+                    ),
+                )
+            )
+        return recs
