@@ -2,3 +2,6 @@
 /.venv/
 *.pyc
 .DS_Store
+RecommendUser/artifacts/*
+local.settings.json
+.env

@@ -23,6 +23,24 @@ def _interaction_event_times(df: pd.DataFrame) -> pd.Series:
     return pd.to_datetime(ts, errors="coerce")
 
 
+def subsample_validation_users(
+    df_val: pd.DataFrame,
+    *,
+    max_users: Optional[int] = None,
+    seed: Optional[int] = None,
+    user_col: str = "user_id",
+) -> pd.DataFrame:
+    """Return a validation frame limited to at most ``max_users`` distinct users."""
+    if max_users is None:
+        return df_val.copy()
+    unique_users = df_val[user_col].dropna().unique()
+    if len(unique_users) <= max_users:
+        return df_val.copy()
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(unique_users, size=int(max_users), replace=False)
+    return df_val.loc[df_val[user_col].isin(chosen)].copy()
+
+
 class DataLoader:
     """ Data manager for the recommender system."""
 
@@ -55,8 +73,11 @@ class DataLoader:
 
     def get_embeddings_by_ids(self, article_ids: List[int]) -> np.ndarray:
         matrix = self.load_article_embeddings_matrix()
-        # On s'assure que les IDs sont valides
+        # matrix dimensions
+        logging.info(f"Matrix dimensions: {matrix.shape}")
+        # Check that the IDs are valid
         valid_ids = [int(aid) for aid in article_ids if 0 <= aid < len(matrix)]
+        logging.info(f"Valid IDs: {len(valid_ids)}")
         return matrix[valid_ids]
 
     def embeddings_aligned_to_article_ids(
@@ -249,6 +270,69 @@ class DataLoader:
 
         return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
+    def data_split_by_date(
+        self,
+        interactions: pd.DataFrame,
+        *,
+        split_time: pd.Timestamp,
+        val_end_exclusive: Optional[pd.Timestamp] = None,
+        min_clicks_per_user_train: int = 1,
+        min_clicks_per_user_val: int = 1,
+        item_col: str = "article_id",
+        split_granularity: Literal["day", "instant"] = "day",
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Split interactions by calendar time: train before ``split_time``, val on/after.
+
+        ``split_granularity`` is ``"day"`` (compare normalized dates) or ``"instant"``
+        (compare full timestamps). Users must meet minimum click counts in both splits.
+        """
+        if val_end_exclusive is not None and split_time >= val_end_exclusive:
+            raise ValueError(
+                "split_time must be strictly before val_end_exclusive when both are set"
+            )
+
+        required = {"user_id", "click_timestamp", item_col}
+        missing = required - set(interactions.columns)
+        if missing:
+            raise ValueError(f"interactions missing columns: {sorted(missing)}")
+
+        if split_granularity not in ("day", "instant"):
+            raise ValueError('split_granularity must be "day" or "instant"')
+
+        df = interactions.loc[:, list(interactions.columns)].copy()
+        event_times = _interaction_event_times(df)
+        split_ts = pd.Timestamp(split_time)
+
+        if split_granularity == "day":
+            boundary = split_ts.normalize()
+            train_mask = event_times.dt.normalize() < boundary
+            val_mask = event_times.dt.normalize() >= boundary
+        else:
+            train_mask = event_times < split_ts
+            val_mask = event_times >= split_ts
+
+        if val_end_exclusive is not None:
+            val_end = pd.Timestamp(val_end_exclusive)
+            val_mask = val_mask & (event_times < val_end)
+
+        train_df = df.loc[train_mask].copy()
+        val_df = df.loc[val_mask].copy()
+
+        train_counts = train_df.groupby("user_id", sort=False).size()
+        val_counts = val_df.groupby("user_id", sort=False).size()
+        eligible_train = set(
+            train_counts[train_counts >= min_clicks_per_user_train].index
+        )
+        eligible_val = set(val_counts[val_counts >= min_clicks_per_user_val].index)
+        eligible_users = eligible_train & eligible_val
+
+        train_df = train_df[train_df["user_id"].isin(eligible_users)].reset_index(
+            drop=True
+        )
+        val_df = val_df[val_df["user_id"].isin(eligible_users)].reset_index(drop=True)
+        return train_df, val_df
+
     def get_recent_popular_articles(self, days: int = None) -> pd.DataFrame:
         """Get the recent popular articles with age normalization."""
         interactions = self.load_user_interactions()
@@ -270,13 +354,14 @@ class DataLoader:
 
         # Join with metadata to get the creation date
         popularity = popularity.merge(
-            metadata[['article_id', 'created_date']],
+            metadata[['article_id', 'created_at_ts']],
             left_index=True,
             right_on='article_id',
             how='left'
         )
 
         # Calculate the age of the article in months
+        popularity['created_date'] = pd.to_datetime(popularity['created_at_ts'], unit='ms')
         popularity['article_age_days'] = (reference_date - popularity['created_date']).dt.days
         popularity['article_age_months'] = popularity['article_age_days'] / 30.0
 
@@ -340,6 +425,36 @@ class DataLoader:
             })
 
         return result
+
+    def get_category_map(
+        self, article_ids: Optional[Iterable[int]] = None
+    ) -> Dict[int, int]:
+        """Return ``article_id → category_id`` from cached article metadata."""
+        metadata = self.load_articles_metadata()
+        full = dict(
+            zip(
+                metadata["article_id"].astype(int),
+                metadata["category_id"].astype(int),
+            )
+        )
+        if article_ids is None:
+            return full
+        return {int(aid): full[int(aid)] for aid in article_ids if int(aid) in full}
+
+    def get_article_created_ts_map(
+        self, article_ids: Optional[Iterable[int]] = None
+    ) -> Dict[int, int]:
+        """Return ``article_id → created_at_ts`` (ms) from cached article metadata."""
+        metadata = self.load_articles_metadata()
+        full = dict(
+            zip(
+                metadata["article_id"].astype(int),
+                metadata["created_at_ts"].astype(np.int64),
+            )
+        )
+        if article_ids is None:
+            return full
+        return {int(aid): int(full[int(aid)]) for aid in article_ids if int(aid) in full}
 
     def get_article_info(self, article_id: int) -> Dict:
         """Get the information of an article."""
