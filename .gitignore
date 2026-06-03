@@ -2,6 +2,7 @@
 /.venv/
 *.pyc
 .DS_Store
-RecommendUser/artifacts/*
 local.settings.json
 .env
+azure_function/local.settings.json
+azure_function/.python_packages/
