@@ -1,317 +1,416 @@
-# Comprendre le système de recommandation content-based
+# Mémo Apprentissages — Projet 10 : Système de Recommandation de Contenu
+
+> Laetitia Ikusawa — Parcours AI Engineer  
+> Dataset : Globo.com (portail de news brésilien)
+
+---
 
 ## Table des matières
 
-1. [Vue d'ensemble de l'architecture](#1-vue-densemble-de-larchitecture)
-2. [Les données disponibles](#2-les-données-disponibles)
-3. [Le concept clé : les embeddings](#3-le-concept-clé--les-embeddings)
-4. [Comment fonctionne la recommandation content-based](#4-comment-fonctionne-la-recommandation-content-based)
-5. [Détail des scripts](#5-détail-des-scripts)
-6. [Les métriques d'évaluation](#6-les-métriques-dévaluation)
-7. [Comment tester le modèle](#7-comment-tester-le-modèle)
-8. [Pièges fréquents à connaître](#8-pièges-fréquents-à-connaître)
+1. [Les systèmes de recommandation — théorie générale](https://claude.ai/chat/f32a4070-017f-4f2b-bd33-5cddd22c1681#1-les-syst%C3%A8mes-de-recommandation--th%C3%A9orie-g%C3%A9n%C3%A9rale)
+2. [Content-Based Filtering (CB)](https://claude.ai/chat/f32a4070-017f-4f2b-bd33-5cddd22c1681#2-content-based-filtering-cb)
+3. [Collaborative Filtering (CF)](https://claude.ai/chat/f32a4070-017f-4f2b-bd33-5cddd22c1681#3-collaborative-filtering-cf)
+4. [Approche Hybride](https://claude.ai/chat/f32a4070-017f-4f2b-bd33-5cddd22c1681#4-approche-hybride)
+5. [Ce que les résultats m'ont appris](https://claude.ai/chat/f32a4070-017f-4f2b-bd33-5cddd22c1681#5-ce-que-les-r%C3%A9sultats-mont-appris)
+6. [Le Serverless](https://claude.ai/chat/f32a4070-017f-4f2b-bd33-5cddd22c1681#6-le-serverless)
 
 ---
 
-## 1. Vue d'ensemble de l'architecture
+## 1. Les systèmes de recommandation — théorie générale
 
-Le projet suit un pattern **orienté objet avec classe abstraite**. Voici comment les trois scripts s'articulent :
+### Définition
+
+Un système de recommandation est un outil qui prédit les contenus (articles, films, produits) qu'un utilisateur est susceptible d'apprécier, à partir de ses comportements passés et/ou des caractéristiques des contenus.
+
+### Les trois grandes familles
+
+
+| Famille                 | Principe                                                  | Exemple                                                                     |
+| ----------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Content-Based           | Recommande ce qui ressemble à ce que l'utilisateur a aimé | "Tu as lu des articles sur le sport → voici d'autres articles sur le sport" |
+| Collaborative Filtering | Recommande ce qu'ont aimé des utilisateurs similaires     | "Des gens comme toi ont aussi lu ça"                                        |
+| Hybride                 | Combine les deux                                          | Netflix, Spotify                                                            |
+
+
+### Les données utilisées dans ce projet
+
+- **Embeddings d'articles** : vecteurs de 250 dimensions générés par un réseau de neurones 1D CNN à partir du texte des articles. Chaque article est représenté par un point dans un espace sémantique — deux articles proches dans cet espace partagent un sujet similaire.
+- **Métadonnées** : catégorie, date de publication, nombre de mots.
+- **Clics** : 385 fichiers CSV représentant les interactions utilisateur-article sur 43 jours (01/10/17 → 13/11/17).
+
+### Le problème du Cold Start
+
+Le cold start est le principal défi des systèmes de recommandation. Il se pose dans deux situations :
+
+- **Nouvel utilisateur** : pas d'historique → impossible de construire un profil ou de trouver des utilisateurs similaires.
+- **Nouvel article** : pas encore cliqué → le CF ne peut pas le recommander. Le CB peut le faire immédiatement grâce à son embedding.
+
+Sur un dataset news, le cold start article est critique : les articles ont une durée de vie de quelques heures et 77% des articles lus chaque jour sont nouveaux.
+
+### Métriques d'évaluation utilisées
+
+**Hit@K (ou Acc@K)** : pour chaque utilisateur, on pose la question "est-ce qu'au moins 1 des K articles recommandés correspond à ce que l'utilisateur a réellement lu ?"
 
 ```
-Recommender (ABC)                  ← recommender.py
-    │  méthode abstraite: recommend()
-    │  méthode concrète:  evaluate()
-    │
-    ├── ContentBasedRecommender    ← content_base_recommender.py
-    └── PopularityRecommender      ← popularity_recommender.py
+Hit = 1 si oui, 0 si non
+Hit@K = moyenne sur tous les utilisateurs
 
-DataLoader                         ← loaders.py
-    │  charge les données depuis data/
-    └── utilisé par ContentBasedRecommender
 ```
 
-La classe `Recommender` est une **classe abstraite** (ABC = Abstract Base Class). Elle définit le contrat que tout recommandeur doit respecter :
-- Il **doit** implémenter la méthode `recommend()`.
-- Il **hérite gratuitement** de la méthode `evaluate()` qui calcule les métriques.
+C'est une métrique binaire, indulgente : elle ne distingue pas si le bon article est en position 1 ou en position K.
+
+**Soft Hit@K** : version sémantique du Hit Rate.
+
+- 1.0 si match exact
+- 0.5 si la cosine similarity entre les recommandations et le profil utilisateur dépasse un seuil (0.7)
+- 0.0 sinon
+
+**Recall@K** : parmi tous les vrais articles lus, combien sont retrouvés dans le Top-K ?
+
+```
+Recall@K = hits dans Top-K / nombre de vrais articles lus
+
+```
+
+**Split temporel** : le train couvre le 01/10 au 09/10, le test couvre le 10/10 au 17/10. Ce split simule la vraie situation de production : le modèle ne connaît pas les articles futurs.
 
 ---
 
-## 2. Les données disponibles
+## 2. Content-Based Filtering (CB)
 
-Le `DataLoader` gère trois types de données :
+### Principe général
 
-| Donnée | Fichier | Description |
-|--------|---------|-------------|
-| Métadonnées des articles | `data/articles_metadata.csv` | `article_id`, `category_id`, `created_date`, etc. |
-| Embeddings des articles | `data/articles_embeddings.pickle` | Matrice NumPy de forme `(n_articles, dim)` — un vecteur par article |
-| Interactions utilisateurs | `data/clicks/clicks_hour_*.csv` | Chaque ligne = un clic d'un `user_id` sur un `click_article_id` |
+Le CB construit un **profil sémantique** pour chaque utilisateur à partir des embeddings des articles qu'il a lus, puis recommande les articles dont l'embedding est le plus proche de ce profil.
 
-**Point important :** l'index de la matrice d'embeddings correspond directement à l'`article_id`. Ainsi `matrix[42]` est le vecteur de l'article 42.
+Le scoring utilise la **similarité cosine** :
+
+```
+score(user, article) = cos(profil_user, embedding_article)
+                     = (profil · embedding) / (||profil|| × ||embedding||)
+
+```
+
+La cosine similarity mesure l'angle entre deux vecteurs — elle vaut 1 si les vecteurs pointent dans la même direction (articles très similaires) et 0 s'ils sont perpendiculaires.
+
+### Stratégie 1 : Mean (Moyenne)
+
+**Principe** : le profil utilisateur est la moyenne simple de tous les embeddings des articles lus.
+
+```python
+user_profile = user_embeddings.mean(axis=0)
+
+```
+
+**Avantages** : simple, stable, peu sensible à un clic aberrant si l'historique est riche.
+
+**Inconvénients** : effet de lissage — mélange tous les intérêts sans distinction. Un utilisateur qui lit 80% sport et 20% politique aura un profil "dilué". Pas réactif aux changements récents.
+
+### Stratégie 2 : Recency (Récence)
+
+**Principe** : pondération exponentielle des embeddings selon leur ancienneté. Les articles récents ont plus de poids.
+
+```python
+deltas_days = (max_ts - timestamps) / np.timedelta64(1, 'D')
+weights = np.exp(-deltas_days / half_life_days)
+weights /= weights.sum()
+user_profile = np.dot(weights, user_embeddings)
+
+```
+
+Le paramètre `half_life_days` contrôle la vitesse de décroissance : avec `half_life_days=7`, un article vieux d'une semaine vaut ~37% d'un article d'aujourd'hui.
+
+**Avantages** : plus réactif aux changements d'intérêt récents. Pertinent sur un dataset news.
+
+**Inconvénients** : "amnésie" si l'utilisateur a eu une période de lecture atypique récemment. Sensible au bruit.
+
+### Stratégie 3 : Category (Catégorie)
+
+**Principe** : identifie les top N catégories préférées de l'utilisateur et applique un boost (×2) aux articles qui en font partie.
+
+```python
+top_cats = set(pd.Series(cats).value_counts().head(top_n_categories).index)
+weights = np.array([2.0 if category in top_cats else 1.0 for aid in aids])
+weights /= weights.sum()
+user_profile = np.dot(weights, user_embeddings)
+
+```
+
+**Avantages** : profil plus net thématiquement, garde-fou contre la dispersion sémantique.
+
+**Inconvénients** : risque de bulle de filtre (enfermement thématique). Lecteurs éclectiques mal servis. Dépend de la qualité des métadonnées.
+
+### CB + Popularité (modèle final retenu)
+
+**Découverte clé du projet** : combiner le score CB avec un score de popularité récente améliore drastiquement les résultats.
+
+```python
+score_final = (1 - beta) * cosine_sim + beta * popularity_score
+
+```
+
+Avec `beta=0.8` (80% popularité, 20% sémantique), le Hit@5 passe de 2.59% à **48.18%**.
+
+Le score de popularité est calculé comme un ratio clics/âge de l'article (en mois), normalisé entre 0 et 1. Il favorise les articles récents très cliqués.
+
+### Optimisation technique : PCA
+
+Pour réduire les artefacts de 424 MB à 54 MB sans perte significative de performance, on applique une PCA sur les embeddings :
+
+```python
+pca = PCA(n_components=33, random_state=42)  # 85% de variance conservée
+candidate_embeddings_reduced = pca.fit_transform(candidate_embeddings)
+# Profils : transform (pas fit_transform) avec le MÊME pca
+user_profiles_reduced = pca.transform(user_profiles_matrix)
+
+```
+
+**Règle critique** : `fit_transform` sur les embeddings candidats, `transform` uniquement sur les profils utilisateurs. Les deux doivent vivre dans le même espace réduit pour que la cosine similarity soit valide.
+
+Résultat : 33 composantes, 85% de variance, perte de performance de seulement 1.5% sur le Hit@5.
 
 ---
 
-## 3. Le concept clé : les embeddings
+## 3. Collaborative Filtering (CF)
 
-Un **embedding** est une représentation numérique dense d'un article sous forme de vecteur (ex : 250 dimensions). Deux articles au contenu similaire auront des vecteurs proches dans l'espace vectoriel.
+### Principe général
+
+Le CF ne regarde pas le contenu des articles. Il s'appuie uniquement sur les comportements collectifs : si beaucoup d'utilisateurs similaires ont lu un article, il est probablement pertinent.
+
+Les données sont représentées dans une **matrice User × Items** où chaque cellule contient le nombre de clics de l'utilisateur sur l'article.
+
+### Le problème de la matrice dense
 
 ```
-Article "Football - Coupe du monde" → [0.12, -0.45, 0.78, ...]  (250 valeurs)
-Article "Rugby - Top 14"            → [0.10, -0.42, 0.81, ...]  (proche !)
-Article "Recette de tarte aux pommes" → [-0.33, 0.91, -0.12, ...] (loin)
+64 734 users × 364 047 articles × 4 bytes = 91 GB RAM
+
 ```
 
-Ces embeddings ont été pré-calculés et stockés dans `articles_embeddings.pickle`.
-
----
-
-## 4. Comment fonctionne la recommandation content-based
-
-L'idée centrale est de répondre à la question : *"Quels articles ressemblent le plus à ce que l'utilisateur a déjà lu ?"*
-
-### Étape 1 : Construire le profil utilisateur
-
-On récupère tous les articles que l'utilisateur a lus, on prend leurs vecteurs d'embeddings, et on en fait la **moyenne**. Ce vecteur moyen représente le "goût" de l'utilisateur.
+Solution : matrice **sparse (CSR)** — on ne stocke que les cellules non-nulles (les clics effectifs). Avec ~14 clics/utilisateur sur 364k articles, la sparsité est de ~99.99%.
 
 ```python
-# Exemple conceptuel
-user_history = [article_12, article_45, article_89]
-user_profile = mean([embedding[12], embedding[45], embedding[89]])
-# user_profile est un vecteur unique qui résume les préférences
-```
-
-### Étape 2 : Calculer la similarité cosinus
-
-Pour chaque article candidat (non encore lu), on calcule la **similarité cosinus** entre le profil utilisateur et l'article.
-
-La similarité cosinus mesure l'angle entre deux vecteurs :
-- **Score de 1.0** → vecteurs identiques (article parfaitement similaire)
-- **Score de 0.0** → vecteurs perpendiculaires (aucun lien)
-- **Score de -1.0** → vecteurs opposés (thèmes opposés)
-
-```
-cosine_similarity(user_profile, article_vector) = cos(θ)
-```
-
-### Étape 3 : Trier et retourner les top-K
-
-On trie tous les articles par score décroissant et on retourne les K meilleurs.
-
----
-
-## 5. Détail des scripts
-
-### `loaders.py` — Le gestionnaire de données
-
-Le `DataLoader` utilise le **lazy loading** : les données ne sont chargées qu'à la première demande, puis mises en cache (attribut `_articles_metadata`, `_articles_embeddings`, etc.).
-
-Méthodes essentielles :
-
-```python
-loader = DataLoader()
-
-# Charge la matrice (n_articles, dim)
-matrix = loader.load_article_embeddings_matrix()
-
-# Charge tout l'historique de clics
-interactions = loader.load_user_interactions()
-
-# Historique d'un utilisateur spécifique, trié du plus récent
-history = loader.get_user_history(user_id=12345)
-
-# Métadonnées d'un article
-info = loader.get_article_info(article_id=42)
-```
-
----
-
-### `recommender.py` — La classe abstraite de base
-
-La méthode la plus importante à comprendre est `evaluate()`. Elle :
-
-1. Appelle `prepare_embeddings()` pour préparer la matrice (optimisation mémoire).
-2. Pour chaque utilisateur du jeu de test, récupère ses **vrais articles** (ground truth).
-3. Génère les **K recommandations** du modèle.
-4. Compare les deux ensembles et calcule les métriques.
-
-```python
-# Schéma de la boucle d'évaluation
-for user_id in test_data["user_id"].unique():
-    true_items  = { articles réellement cliqués dans le test }
-    recommended = recommender.recommend(user_id, num_recommendations=k)
-    top_k       = { les k articles recommandés }
-
-    hits      = |true_items ∩ top_k|  # intersection
-    precision = hits / k
-    recall    = hits / len(true_items)
-    f1        = 2 * precision * recall / (precision + recall)
-```
-
----
-
-### `content_base_recommender.py` — L'algorithme principal
-
-Ce fichier contient deux méthodes de recommandation :
-
-#### `_recommend_prepared()` — Mode rapide (utilisé pendant l'évaluation)
-
-Appelé quand `prepare_embeddings()` a été invoqué au préalable. La matrice est pré-filtrée aux seuls articles du train + test, ce qui accélère les calculs.
-
-```
-prepare_embeddings(test_data)   → filtre la matrice aux articles pertinents
-_recommend_prepared(user_id)    → utilise cette matrice restreinte
-```
-
-#### `_recommend_from_full_catalog()` — Mode catalogue complet
-
-Utilisé en production (recommandation en temps réel) quand on n'a pas pré-calculé de matrice restreinte. Parcourt tous les articles du catalogue.
-
-#### `prepare_embeddings()` — Optimisation mémoire
-
-Cette méthode construit un `DataFrame` indexé par `article_id`, filtré uniquement aux articles présents dans le train **ou** le test. Cela évite de charger tous les ~100k articles en mémoire pour chaque utilisateur.
-
----
-
-## 6. Les métriques d'évaluation
-
-La méthode `evaluate()` retourne 4 métriques, toutes calculées **@K** (sur les K premières recommandations) :
-
-### Hit@K
-**"Est-ce qu'au moins un article recommandé est correct ?"**
-- Vaut 1 si au moins 1 article recommandé est dans la ground truth, 0 sinon.
-- C'est une métrique binaire par utilisateur, on en fait la moyenne.
-
-### Precision@K
-**"Parmi mes K recommandations, quelle fraction est correcte ?"**
-```
-Precision@K = (nombre de hits parmi les K recommandations) / K
-```
-- Ex : 2 bons articles sur 5 recommandés → Precision@5 = 0.40
-
-### Recall@K
-**"Parmi tous les vrais articles, quelle fraction j'ai retrouvée ?"**
-```
-Recall@K = (nombre de hits) / (nombre total de vrais articles dans le test)
-```
-- Ex : 2 bons articles retrouvés sur 10 vrais → Recall@10 = 0.20
-
-### F1@K
-**Compromis entre Precision et Recall** (moyenne harmonique).
-```
-F1@K = 2 * Precision@K * Recall@K / (Precision@K + Recall@K)
-```
-
-> **Interprétation pratique :** un Hit@5 de 0.35 signifie que pour 35% des utilisateurs, au moins un des 5 articles recommandés était réellement cliqué dans le test. C'est la métrique la plus intuitive pour commencer.
-
----
-
-## 7. Comment tester le modèle
-
-### Prérequis
-
-```python
-from recommenders.loaders import DataLoader
-from recommenders.content_base_recommender import ContentBasedRecommender
-import pandas as pd
-```
-
-### Étape 1 : Charger les données et créer un split train/test
-
-```python
-loader = DataLoader()
-interactions = loader.load_user_interactions()
-
-# Sort by time to avoid data leakage
-interactions = interactions.sort_values("click_timestamp")
-
-# 80% train, 20% test (temporal split)
-split_idx = int(len(interactions) * 0.8)
-train_data = interactions.iloc[:split_idx]
-test_data  = interactions.iloc[split_idx:]
-
-print(f"Train: {len(train_data):,} interactions")
-print(f"Test:  {len(test_data):,} interactions")
-```
-
-### Étape 2 : Instancier le recommandeur
-
-```python
-recommender = ContentBasedRecommender(
-    data_loader=loader,
-    train_data=train_data,
-    k=5,                            # nombre de recommandations
-    item_col="click_article_id",    # colonne article dans les données
-)
-```
-
-### Étape 3 : Tester la recommandation pour un utilisateur
-
-```python
-# Récupérer un utilisateur actif
-active_users = loader.get_most_active_users(limit=5)
-user_id = active_users[0]["user_id"]
-
-# Générer des recommandations
-recommendations = recommender.recommend(user_id, num_recommendations=5)
-
-for rec in recommendations:
-    print(f"Article {rec['article_id']} | Score: {rec['score']:.4f} | {rec['reason']}")
-```
-
-### Étape 4 : Évaluer le modèle sur le jeu de test
-
-```python
-# Limiter à un sous-ensemble d'utilisateurs pour aller plus vite
-sample_users = test_data["user_id"].unique()[:200]
-test_sample  = test_data[test_data["user_id"].isin(sample_users)]
-
-metrics = recommender.evaluate(test_sample)
-print(metrics)
-# {
-#   "Hit@5":       0.3500,
-#   "Precision@5": 0.0900,
-#   "Recall@5":    0.2100,
-#   "F1@5":        0.1260,
-# }
-```
-
-### Étape 5 : Comparer avec la baseline de popularité
-
-```python
-from recommenders.popularity_recommender import PopularityRecommender
-
-# Préparer les données pour le recommandeur de popularité
-# (il attend une colonne "article_id" et "category_id")
-metadata = loader.load_articles_metadata()
-train_with_meta = train_data.merge(
-    metadata[["article_id", "category_id"]],
-    left_on="click_article_id",
-    right_on="article_id",
-    how="left"
+from scipy.sparse import csr_matrix
+user_item_matrix = csr_matrix(
+    (clicks, (user_idxs, item_idxs)),
+    shape=(n_users, n_items)
 )
 
-popularity_rec = PopularityRecommender(train_df=train_with_meta)
-popularity_rec.fit_with_holdout()
+```
 
-# Évaluation manuelle car PopularityRecommender retourne des int, pas des dicts
-# (son interface diffère légèrement de ContentBasedRecommender)
+**Point important** : les IDs doivent être des entiers continus (0, 1, 2...) — `pd.Categorical` permet de les réindexer.
+
+### Stratégie 1 : Item-Item Cosine
+
+**Principe** : calcule la similarité cosine entre articles basée sur leurs co-clics. Recommande les articles similaires à ceux déjà lus.
+
+```
+score(user, article_j) = Σ clics(user, article_i) × cos(article_i, article_j)
+
+```
+
+C'est un modèle **mémoriel** — pas de paramètres appris, juste des similarités calculées. Simple à expliquer et auditer.
+
+**Limite** : un article jamais cliqué ne peut pas être recommandé (cold start total).
+
+### Stratégie 2 : ALS (Alternating Least Squares)
+
+**Principe** : factorise la matrice User × Items en deux matrices de facteurs latents U (users) et V (items). Le score est un produit scalaire :
+
+```
+score(user, article) = U[user] · V[article]
+
+```
+
+L'algorithme alterne entre deux étapes :
+
+1. Figer V, optimiser U (chaque utilisateur ajuste son profil pour minimiser l'erreur)
+2. Figer U, optimiser V (chaque article ajuste son profil)
+
+Le paramètre `alpha=40` amplifie le signal de confiance (formulation Hu & Koren) : plus un utilisateur clique sur un article, plus le signal est fort.
+
+**Avantage** : capture des "relations cachées" entre articles que le contenu seul ne voit pas.
+
+**Inconvénients** : boîte noire, sensible aux hyperparamètres, cold start sur les nouveaux articles.
+
+### Stratégie 3 : BPR (Bayesian Personalized Ranking)
+
+**Principe** : optimise directement l'**ordre** de recommandation plutôt que de reconstruire les valeurs de clics. Il apprend que l'utilisateur préfère l'article i à l'article j.
+
+L'apprentissage se fait par triplets `(user, article_positif, article_négatif)`. Pour chaque triplet, le modèle ajuste les facteurs latents pour que `score(user, positif) > score(user, négatif)`.
+
+Utilise une matrice **binaire** (0/1) — le nombre exact de clics n'a pas de sens dans ce cadre.
+
+**Avantage** : moins de biais de popularité que ALS, fonctionne bien sur des données très sparses.
+
+**Inconvénient** : entraînement par sampling stochastique — peut être instable.
+
+### Stratégie 4 : LMF (Logistic Matrix Factorization)
+
+**Principe** : même structure de facteurs latents qu'ALS, mais le score est transformé par une sigmoïde pour être interprété comme une **probabilité de clic** :
+
+```
+score(user, article) = σ(U[user] · V[article]) = 1 / (1 + exp(-U · V))
+
+```
+
+**Avantage** : scores interprétables comme probabilités (0 à 1).
+
+**Inconvénient** : les non-clics sont traités comme des désintérêts, ce qui est une approximation — un article non cliqué peut juste ne pas avoir été vu.
+
+### Note technique : implicit et la transposée
+
+La librairie `implicit` est conçue pour les matrices Items × Users :
+
+- `model.fit()` attend **Items × Users** → passer `user_item_matrix.T`
+- `model.recommend()` attend **Users × Items** → passer `user_item_matrix` (sans transposée)
+
+---
+
+## 4. Approche Hybride
+
+### Principe : Two-Stage Recommender
+
+L'hybride combine CB et CF en deux étapes séquentielles :
+
+**Stage 1 — CB Retrieval** : sélectionner les N articles les plus proches sémantiquement du profil utilisateur (ex: Top 100). Le CB agit comme un filtre de pertinence thématique.
+
+**Stage 2 — CF Re-ranking** : parmi ces 100 candidats, réordonner selon les scores ALS (comportement collectif).
+
+### Score hybride pondéré
+
+```python
+# Normaliser les rangs CB (position 0 = score 1.0)
+cb_rank_score = {aid: (n - i) / n for i, aid in enumerate(candidates)}
+
+# Normaliser les scores CF entre 0 et 1
+cf_norm = {aid: (score - cf_min) / cf_range for aid, score in cf_scores.items()}
+
+# Score final
+score = alpha * cf_norm.get(aid, 0.0) + (1 - alpha) * cb_rank_score[aid]
+
+```
+
+### Pourquoi le CB doit être en premier
+
+Si on commence par le CF, le pool de candidats contient uniquement des articles du train (articles connus). Les 77% d'articles nouveaux du test sont exclus d'office. Le CB en premier garantit que les nouveaux articles restent dans le pool.
+
+---
+
+## 5. Ce que les résultats m'ont appris
+
+### Tableau comparatif final
+
+
+| Modèle                      | Hit@5      | Soft@5     | Observation           |
+| --------------------------- | ---------- | ---------- | --------------------- |
+| CB Mean                     | 2.47%      | 50.93%     | Baseline CB           |
+| CB Recency                  | 2.58%      | 50.96%     | Marginal              |
+| CB Category                 | 2.59%      | 51.04%     | Meilleur CB pur       |
+| Item-Item                   | 1.01%      | 13.56%     | Cold start total      |
+| ALS                         | 1.05%      | 15.09%     | Limité par cold start |
+| BPR                         | 0.84%      | 13.55%     | Idem                  |
+| LMF                         | 0.65%      | 8.17%      | Idem                  |
+| Hybride CB+ALS              | 0.44%      | 49.78%     | Dégradation           |
+| **CB + Popularité (β=0.8)** | **48.18%** | **74.09%** | ✅ Modèle retenu       |
+
+
+### Pourquoi le CB bat le CF sur ce dataset
+
+Le split temporel crée une **rupture nette** entre train et test : seulement 23% des articles lus dans le test apparaissent dans le train. Le CF ne peut recommander que des articles connus — il est structurellement aveugle à 77% des bonnes réponses.
+
+Ce n'est pas un échec du CF en tant qu'algorithme. Sur un dataset films ou musique (contenu stable), le CF serait probablement meilleur. Sur un dataset news à forte rotation, c'est une inadéquation fondamentale.
+
+### Pourquoi les 3 stratégies CB donnent des résultats similaires
+
+Avec une moyenne de 14 clics par utilisateur, la pondération (recency, category) apporte peu de différence par rapport à la moyenne simple. Il n'y a pas assez de signal pour que la pondération fasse une vraie différence — les résultats convergent vers le même profil moyen.
+
+### Pourquoi l'hybride CB→CF dégrade les résultats
+
+Le CF re-rank en mettant en tête les articles qu'il connaît (vieux articles du train), et en pénalisant les articles nouveaux (`score = -inf` si absent du CF). Résultat : les bons articles (nouveaux) tombent en bas de liste.
+
+La correction par score pondéré (alpha=0) confirme : sans contribution CF, l'hybride retrouve exactement les scores CB.
+
+### Pourquoi CB + popularité fonctionne si bien
+
+La popularité récente est un proxy puissant de l'intention de lecture sur un site news. Un article très cliqué dans les dernières heures est probablement pertinent pour la plupart des utilisateurs — indépendamment de leur profil sémantique.
+
+Avec `beta=0.8`, le modèle dit : *"recommande principalement ce qui est populaire maintenant, avec une légère coloration sémantique selon le profil de l'utilisateur"*. C'est exactement le comportement d'un éditorial de news bien fait.
+
+### Conclusion sur le choix du modèle
+
+Sur un dataset news, la **fraîcheur et la popularité priment sur la personnalisation sémantique**. La personnalisation reste utile en complément (le beta optimal n'est pas 1.0 mais 0.8), mais elle ne peut pas compenser l'absence de signal comportemental sur les nouveaux articles.
+
+---
+
+## 6. Le Serverless
+
+### L'analogie
+
+Imagine la différence entre avoir un cuisinier à demeure 24h/24 (serveur dédié) et appeler un traiteur uniquement quand tu as des invités (serverless). Avec le traiteur, tu ne paies que quand il cuisine.
+
+### Ce que "serverless" veut vraiment dire
+
+Le terme est un abus de langage marketing — il y a bien des serveurs physiques derrière. Ce que "serverless" signifie réellement : **tu n'as pas à gérer de serveur**. Azure s'occupe de l'infrastructure, tu déploies juste ton code.
+
+En coulisses, Azure dispose de data centers avec des milliers de serveurs physiques. Quand ta Function est appelée, Azure prend un serveur disponible dans son pool, exécute ton code, puis le libère pour un autre client. Tu partages une infrastructure mutualisée et ne paies que ta consommation réelle.
+
+### Cold Start vs Warm Start
+
+**Cold start** : l'instance s'est endormie. Le premier appel réveille le code et charge les artefacts — 1 à 3 secondes de latence. C'est pour ça que le cache global `_recommender` est important : une fois chargé, les appels suivants sont quasi-instantanés.
+
+**Warm start** : l'instance est encore active (appels réguliers). Réponse en quelques ms.
+
+### Pourquoi c'est le bon choix pour ce projet
+
+
+|             | Serveur classique (VM)   | Serverless (Azure Functions) |
+| ----------- | ------------------------ | ---------------------------- |
+| Coût        | 24h/24 même sans traffic | Seulement à l'usage          |
+| Scalabilité | Manuelle                 | Automatique                  |
+| Maintenance | À ta charge              | Gérée par Azure              |
+| Cold start  | Aucun                    | 1-3 sec parfois              |
+| Gratuit     | Non                      | 1M appels/mois               |
+
+
+Pour un MVP avec un traffic faible et imprévisible, le serverless est optimal.
+
+### Pourquoi Azure offre ce service gratuitement au départ
+
+C'est un modèle économique intelligent :
+
+- **Mutualisation** : Azure empile des centaines de fonctions sur le même serveur physique. Un serveur à 90% de charge au lieu de 10% = 9× plus rentable.
+- **Lock-in** : une fois que ton code tourne sur Azure Functions, tu utilises aussi Blob Storage, Application Insights, Data Factory... Chaque service en attire un autre. Plus tu utilises l'écosystème, plus il est coûteux de partir chez un concurrent (AWS, GCP).
+- **Acquisition** : les étudiants et startups démarrent gratuitement, grandissent, et deviennent des clients payants. C'est un pari sur ton succès.
+
+### Fichiers clés d'une Azure Function Python
+
+`function_app.py` : le point d'entrée. Définit les routes HTTP et la logique de l'API.
+
+`host.json` : indique à Azure comment piloter le moteur de fonctions (timeout, version du runtime, logging).
+
+`requirements.txt` : dépendances Python installées par Azure lors du déploiement.
+
+`local.settings.json` : variables d'environnement **uniquement en local**. Jamais commité sur GitHub. L'équivalent en production est le panneau "Environment variables" dans le portail Azure.
+
+### Architecture déployée
+
+```
+App Streamlit (local/cloud)
+        ↓ HTTP GET /recommend/{user_id}
+Azure Function (serverless)
+        ↓ Cold start : charge les artefacts une fois
+Azure Blob Storage
+        - candidate_embeddings.pkl  (45.8 MB, PCA 33 composantes)
+        - user_profiles.pkl         (10.0 MB)
+        - popularity_scores.pkl     (1.0 MB)
+        - pca_final.pkl             (0.0 MB)
+        - [+ 4 autres artefacts]
+        ↑ Warm start : cache global _recommender en mémoire
+Azure Function
+        ↓ JSON {"user_id": x, "recommendations": [...]}
+App Streamlit
+
 ```
 
 ---
 
-## 8. Pièges fréquents à connaître
-
-### Le split doit être temporel
-Toujours trier par `click_timestamp` avant de splitter. Si on coupe aléatoirement, on crée une **fuite de données** (data leakage) : le modèle verrait des articles "futurs" à l'entraînement.
-
-### `prepare_embeddings()` doit être appelé avant `evaluate()`
-La méthode `evaluate()` de la classe parente appelle `prepare_embeddings()` automatiquement. Mais si on appelle `recommend()` directement sans passer par `evaluate()`, la matrice restreinte n'est pas construite et le modèle tombe sur `_recommend_from_full_catalog()` (plus lent mais correct).
-
-### Les utilisateurs sans historique d'entraînement sont exclus
-Si un utilisateur du jeu de test n'a aucune interaction dans le train, `_recommend_prepared()` retourne une liste vide. C'est le problème du **cold start** — ce modèle content-based ne le gère pas.
-
-### La similarité cosinus n'est pas affectée par la magnitude
-Deux articles avec des embeddings de normes très différentes peuvent quand même avoir une similarité cosinus élevée si leur **direction** est similaire. C'est un avantage : pas besoin de normaliser les embeddings au préalable.
-
----
-
-*Documentation générée le 16 avril 2026.*
+*Document généré à l'issue du Projet 10 — Parcours AI Engineer*
