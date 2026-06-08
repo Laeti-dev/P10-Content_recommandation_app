@@ -15,7 +15,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-class ProductionRecommender:
+class Recommender:
     """
     Inference-only recommender.
     Loads artifacts from Azure Blob Storage and serves top-K recommendations.
@@ -45,7 +45,7 @@ class ProductionRecommender:
     # Loading
     # ------------------------------------------------------------------
 
-    def load(self, artifacts: Dict[str, object]) -> "ProductionRecommender":
+    def load(self, artifacts: Dict[str, object]) -> "Recommender":
         """
         Populate recommender from a dict of pre-loaded artifacts.
 
@@ -76,7 +76,7 @@ class ProductionRecommender:
 
         self._is_ready = True
         logger.info(
-            "ProductionRecommender ready: %d articles, %d user profiles.",
+            "Recommender ready: %d articles, %d user profiles.",
             len(self.candidate_ids),
             len(self.user_profiles),
         )

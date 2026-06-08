@@ -1,10 +1,10 @@
 # Content Recommandation App
 
-OpenClassrooms • [Ai Engineer track](https://openclassrooms.com/fr/paths/795-ai-engineer) • [Laetitia Ikusawa](https://www.linkedin.com/in/laetitia-ikusawa/)
+OpenClassrooms • [AI Engineer track](https://openclassrooms.com/fr/paths/795-ai-engineer) • [Laetitia Ikusawa](https://www.linkedin.com/in/laetitia-ikusawa/)
 
 ---
 
-## Business Objetives
+## Business Objectives
 
 - **Deliver personalized content recommendations** to improve user engagement and satisfaction.
 - **Facilitate scalable onboarding** of new users and articles to support company growth.
@@ -23,7 +23,7 @@ OpenClassrooms • [Ai Engineer track](https://openclassrooms.com/fr/paths/795-a
 - Build abilities in **deploying web applications** using frameworks like Flask or Streamlit.
 - Enhance **communication skills** through preparing presentations and demonstrating project outcomes.
 
-*---
+---
 
 ## 🏗️ Architecture
 
@@ -107,6 +107,13 @@ Streamlit App
 Original embeddings (250D, 424 MB) reduced to 33 components (85% variance retained, 54 MB) with only -1.5% loss on Hit@5.
 
 ---
+
+## 📦 Data
+
+Raw data files are not included in this repository due to size constraints.
+Download them from [Kaggle](https://www.kaggle.com/datasets/gspmoreira/news-portal-user-interactions-by-globocom) and place them in the `data/` folder following the structure above.
+
+Trained model artifacts are stored in Azure Blob Storage — see the [Azure Deployment](#️-azure-deployment) section.
 
 ## 🗂️ Project Structure
 
@@ -335,6 +342,22 @@ New clicks           ──►                         - Article → embedding (
 ## 📚 Documentation
 
 - `[documentation/learnings.md](documentation/learnings.md)` — Full theoretical memo (CB, CF, Hybrid, Serverless, PCA)
+- `[documentation/architecture_synthesis.md](documentation/architecture_synthesis.md)` — Architecture V1 & V2 synthesis document
+
+---
+
+## 🧪 Tests
+
+```bash
+# Run all tests
+poetry run pytest
+
+# Run with coverage report
+poetry run pytest --cov=. --cov-report=term-missing
+
+# Run a specific test file
+poetry run pytest tests/test_recommender.py -v
+```
 
 ---
 
@@ -347,4 +370,4 @@ New clicks           ──►                         - Article → embedding (
 
 ---
 
-*AI Engineer Track — OpenClassrooms | April 2026*
+*AI Engineer Track — OpenClassrooms | May 2026*

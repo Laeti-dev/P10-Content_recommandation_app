@@ -24,7 +24,7 @@ import azure.functions as func
 import numpy as np
 from azure.storage.blob import BlobServiceClient
 
-from recommender import ProductionRecommender
+from recommender import Recommender
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -40,10 +40,10 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 # ---------------------------------------------------------------------------
 # Global cache — loaded once per warm instance
 # ---------------------------------------------------------------------------
-_recommender: Optional[ProductionRecommender] = None
+_recommender: Optional[Recommender] = None
 
 
-def _get_recommender() -> ProductionRecommender:
+def _get_recommender() -> Recommender:
     """
     Load and cache the recommender.
     On a warm Azure Function instance, artifacts are loaded only once.
@@ -83,7 +83,7 @@ def _get_recommender() -> ProductionRecommender:
         artifacts[name] = pickle.loads(data)
         logger.info("  ✅ %s loaded", name)
 
-    _recommender = ProductionRecommender().load(artifacts)
+    _recommender = Recommender().load(artifacts)
     logger.info(
         "Recommender ready — %d articles, %d users.",
         _recommender.n_articles(),
