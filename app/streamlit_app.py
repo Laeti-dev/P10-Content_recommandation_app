@@ -36,126 +36,236 @@ st.set_page_config(
     page_title="Recommendation System",
     page_icon="📰",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-    /* Global */
-    @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    :root {
+        --bg: #f4f6f9;
+        --surface: #ffffff;
+        --border: #d8dee9;
+        --text: #1f2937;
+        --text-muted: #6b7280;
+        --accent: #1d4ed8;
+        --accent-soft: #dbeafe;
+        --accent-hover: #1e40af;
+        --success: #047857;
+        --error: #b91c1c;
+        --error-bg: #fef2f2;
+    }
 
     html, body, [class*="css"] {
-        font-family: 'DM Sans', sans-serif;
+        font-family: 'Inter', sans-serif;
+        color: var(--text);
     }
 
-    /* Hide Streamlit default elements */
-    #MainMenu, footer, header { visibility: hidden; }
+    .stApp {
+        background-color: var(--bg);
+    }
 
-    /* Title */
+    #MainMenu, footer { visibility: hidden; }
+
+    section[data-testid="stMain"] .block-container {
+        padding-top: 4.5rem;
+        max-width: 1100px;
+    }
+
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: var(--surface);
+        border-right: 1px solid var(--border);
+    }
+
+    section[data-testid="stSidebar"] .block-container {
+        padding-top: 4rem;
+    }
+
+    section[data-testid="stSidebar"] h3 {
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 0.25rem;
+    }
+
+    /* Header */
+    .app-header {
+        margin-bottom: 2rem;
+    }
     .app-title {
-        font-family: 'DM Mono', monospace;
-        font-size: 1.1rem;
-        font-weight: 500;
-        color: #00e5a0;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        margin-bottom: 4px;
+        font-size: 1.75rem;
+        font-weight: 600;
+        color: var(--text);
+        margin: 0 0 0.35rem 0;
+        letter-spacing: -0.02em;
     }
     .app-subtitle {
-        font-family: 'DM Mono', monospace;
-        font-size: 0.78rem;
-        color: #666;
-        margin-bottom: 32px;
+        font-size: 0.95rem;
+        color: var(--text-muted);
+        margin: 0;
     }
 
-    /* Article card */
+    /* Cards */
     .article-card {
-        background: #1a1a1a;
-        border: 1px solid #2a2a2a;
-        border-radius: 8px;
-        padding: 14px 20px;
-        margin-bottom: 8px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 10px;
         display: flex;
         align-items: center;
-        gap: 16px;
-        transition: border-color 0.15s;
+        gap: 14px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
     }
-    .article-card:hover { border-color: #00e5a0; }
+    .article-card:hover {
+        border-color: #93c5fd;
+    }
 
     .rank {
-        font-family: 'DM Mono', monospace;
-        font-size: 0.7rem;
-        color: #555;
-        min-width: 20px;
-        text-align: right;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.8rem;
+        font-weight: 500;
+        color: var(--text-muted);
+        min-width: 24px;
+        text-align: center;
+        background: #f3f4f6;
+        border-radius: 6px;
+        padding: 4px 0;
     }
     .article-id {
-        font-family: 'DM Mono', monospace;
-        font-size: 1rem;
-        color: #e8e8e8;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.95rem;
+        color: var(--text);
         flex: 1;
     }
     .article-badge {
-        font-family: 'DM Mono', monospace;
-        font-size: 0.65rem;
-        color: #00e5a0;
-        background: #00e5a015;
-        border: 1px solid #00e5a040;
-        padding: 2px 10px;
-        border-radius: 4px;
+        font-family: 'Inter', sans-serif;
+        font-size: 0.72rem;
+        font-weight: 500;
+        color: var(--accent);
+        background: var(--accent-soft);
+        border: 1px solid #bfdbfe;
+        padding: 3px 10px;
+        border-radius: 999px;
     }
 
-    /* Error */
-    .error-box {
-        background: #ff4d4d10;
-        border: 1px solid #ff4d4d;
-        border-radius: 6px;
-        padding: 12px 16px;
-        font-family: 'DM Mono', monospace;
+    .meta-line {
+        font-size: 0.875rem;
+        color: var(--text-muted);
+        margin-bottom: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .meta-line strong {
+        color: var(--text);
+        font-weight: 600;
+    }
+
+    .empty-state {
+        background: var(--surface);
+        border: 1px dashed var(--border);
+        border-radius: 12px;
+        padding: 4rem 2rem;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 0.95rem;
+        line-height: 1.6;
+    }
+
+    .info-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem;
+        font-size: 0.875rem;
+        color: var(--text-muted);
+        line-height: 1.7;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .info-card-title {
         font-size: 0.8rem;
-        color: #ff4d4d;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+        margin-bottom: 0.75rem;
+    }
+    .info-card strong {
+        color: var(--text);
+    }
+
+    .error-box {
+        background: var(--error-bg);
+        border: 1px solid #fecaca;
+        border-radius: 10px;
+        padding: 14px 16px;
+        font-size: 0.875rem;
+        color: var(--error);
+        line-height: 1.6;
+    }
+
+    .sidebar-footer {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.72rem;
+        color: var(--text-muted);
+        word-break: break-all;
+        line-height: 1.5;
+    }
+    .sidebar-footer span {
+        color: var(--text);
     }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
-st.markdown('<div class="app-title">▸ Recommendation System</div>', unsafe_allow_html=True)
-st.markdown('<div class="app-subtitle">Content-Based + Popularity · Globo.com dataset</div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------------------------
-# Layout : sidebar + main
+# Sidebar
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("### ⚙️ Parameters")
+    st.markdown("### Parameters")
 
     beta = st.slider(
         "Beta (popularity weight)",
-        min_value=0.0, max_value=1.0,
-        value=0.8, step=0.05,
-        help="0 = CB pur · 1 = popularité pure · optimal: 0.8"
+        min_value=0.0,
+        max_value=1.0,
+        value=0.8,
+        step=0.05,
+        help="0 = pure content-based · 1 = pure popularity · optimal: 0.8",
     )
 
     topk = st.selectbox("Top-K", options=[5, 10, 20], index=0)
 
     st.divider()
-    st.markdown("### 👤 Select a user")
+    st.markdown("### Select a user")
 
     selected_user = st.selectbox(
         "User ID",
         options=TOP_USERS,
         format_func=lambda x: f"User #{x}",
+        label_visibility="collapsed",
     )
 
-    get_recs = st.button("▸ Get recommendations", use_container_width=True, type="primary")
+    get_recs = st.button("Get recommendations", use_container_width=True, type="primary")
 
     st.divider()
-    st.markdown(f"""
-    <div style="font-family: DM Mono, monospace; font-size: 0.7rem; color: #555;">
-    Function URL<br>
-    <span style="color: #888">{FUNCTION_URL}</span>
+    st.markdown(
+        f'<div class="sidebar-footer">Function URL<br><span>{FUNCTION_URL}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+    <div class="app-header">
+        <p class="app-title">Recommendation System</p>
+        <p class="app-subtitle">Content-based filtering + popularity · Globo.com dataset</p>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------------
 # Main panel
@@ -164,97 +274,96 @@ col1, col2 = st.columns([2, 1])
 
 with col1:
     if not get_recs:
-        st.markdown("""
-        <div style="
-            border: 1px dashed #2a2a2a;
-            border-radius: 8px;
-            padding: 64px 32px;
-            text-align: center;
-            font-family: DM Mono, monospace;
-            font-size: 0.8rem;
-            color: #444;
-        ">
-            ← Select a user and click "Get recommendations"
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="empty-state">
+                Select a user in the sidebar, then click <strong>Get recommendations</strong>.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     else:
         url = f"{FUNCTION_URL}/recommend/{selected_user}"
         params = {"beta": beta, "topk": topk}
 
-        with st.spinner(f"Calling Azure Function for user #{selected_user}..."):
+        with st.spinner(f"Fetching recommendations for user #{selected_user}..."):
             try:
                 response = requests.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
-
                 recommendations = data.get("recommendations", [])
 
-                st.markdown(f"""
-                <div style="
-                    font-family: DM Mono, monospace;
-                    font-size: 0.75rem;
-                    color: #00e5a0;
-                    margin-bottom: 16px;
-                ">
-                    User #{selected_user} · {len(recommendations)} recommendations · beta={beta}
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div class="meta-line">
+                        <strong>User #{selected_user}</strong>
+                        · {len(recommendations)} recommendations
+                        · beta = {beta}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
                 for i, article_id in enumerate(recommendations):
-                    st.markdown(f"""
-                    <div class="article-card">
-                        <span class="rank">{i + 1}</span>
-                        <span class="article-id">{article_id}</span>
-                        <span class="article-badge">article</span>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div class="article-card">
+                            <span class="rank">{i + 1}</span>
+                            <span class="article-id">{article_id}</span>
+                            <span class="article-badge">article</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
             except requests.Timeout:
-                st.markdown(f"""
-                <div class="error-box">
-                    ⚠ Timeout — Azure Function did not respond within 30s.<br>
-                    Is it running at {FUNCTION_URL} ?
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div class="error-box">
+                        Timeout — the Azure Function did not respond within 30s.<br>
+                        Is it running at <strong>{FUNCTION_URL}</strong>?
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             except requests.HTTPError as e:
-                st.markdown(f"""
-                <div class="error-box">
-                    ⚠ HTTP Error {e.response.status_code}<br>
-                    {e.response.text}
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div class="error-box">
+                        HTTP error {e.response.status_code}<br>
+                        {e.response.text}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
             except requests.ConnectionError:
-                st.markdown(f"""
-                <div class="error-box">
-                    ⚠ Connection refused — Azure Function unreachable.<br>
-                    Check that it is running at {FUNCTION_URL}
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div class="error-box">
+                        Connection refused — Azure Function unreachable.<br>
+                        Check that it is running at <strong>{FUNCTION_URL}</strong>.
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 with col2:
     if get_recs:
-        st.markdown("""
-        <div style="
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 8px;
-            padding: 20px;
-            font-family: DM Mono, monospace;
-            font-size: 0.75rem;
-            color: #666;
-        ">
-        <div style="color: #00e5a0; margin-bottom: 12px;">ℹ Model info</div>
-        Strategy: CB Category<br><br>
-        PCA: 33 components<br>
-        (85% variance retained)<br><br>
-        Catalogue: 364,047 articles<br>
-        Users: 64,734 profiles<br><br>
-        <div style="color: #444; margin-top: 12px; font-size: 0.65rem;">
-        Higher beta → more popular<br>
-        Lower beta → more semantic
-        </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="info-card">
+                <div class="info-card-title">Model info</div>
+                <strong>Strategy:</strong> CB Category<br><br>
+                <strong>PCA:</strong> 33 components<br>
+                (85% variance retained)<br><br>
+                <strong>Catalogue:</strong> 364,047 articles<br>
+                <strong>Users:</strong> 64,734 profiles<br><br>
+                Higher beta → more popular<br>
+                Lower beta → more semantic
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
